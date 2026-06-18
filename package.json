@@ -1,0 +1,28 @@
+{
+  "name": "archive",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "predev": "npm run generate-thumbnails",
+    "generate-thumbnails": "node scripts/generate-thumbnails.mjs",
+    "prebuild": "npm run generate-thumbnails",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "framer-motion": "^11.15.0",
+    "image-size": "^2.0.2",
+    "next": "14.2.21",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "sharp": "^0.33.5",
+    "@types/node": "^20.17.10",
+    "@types/react": "^18.3.14",
+    "@types/react-dom": "^18.3.4",
+    "typescript": "^5.7.2"
+  }
+}
