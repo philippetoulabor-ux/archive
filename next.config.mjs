@@ -1,6 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: "standalone",
+  output: process.env.VERCEL ? "export" : "standalone",
+  trailingSlash: true,
+  experimental: {
+    outputFileTracingExcludes: {
+      "*": ["./database-archive/**"],
+    },
+  },
 };
 
 export default nextConfig;
