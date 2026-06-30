@@ -5,7 +5,7 @@ import type { ArchiveProject, ProjectImage } from "./types";
 
 const IMAGE_EXTENSIONS = new Set([".webp", ".jpg", ".jpeg", ".png"]);
 
-const EXCLUDED_SLUGS = new Set(["logo"]);
+const EXCLUDED_SLUGS = new Set(["logo", "_thumbs", "buttons"]);
 
 function humanizeSlug(slug: string): string {
   return slug
@@ -77,7 +77,12 @@ export function getArchiveProjects(): ArchiveProject[] {
 
   const slugs = fs
     .readdirSync(archiveRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && !EXCLUDED_SLUGS.has(entry.name))
+    .filter(
+      (entry) =>
+        entry.isDirectory() &&
+        !EXCLUDED_SLUGS.has(entry.name) &&
+        !entry.name.startsWith("_"),
+    )
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b));
 
