@@ -35,6 +35,7 @@ export interface GridLayout {
   targetTileArea: number;
   tileSizeCache: Map<string, { width: number; height: number }>;
   tileTopCache: Map<string, number>;
+  columnWalkRow: Map<number, number>;
 }
 
 function getProjectAt(
@@ -115,6 +116,7 @@ export function buildGridLayout(
     targetTileArea,
     tileSizeCache: new Map(),
     tileTopCache: new Map(),
+    columnWalkRow: new Map(),
   };
 }
 
@@ -138,19 +140,33 @@ export function getTileTop(col: number, row: number, layout: GridLayout): number
   const cached = layout.tileTopCache.get(key);
   if (cached !== undefined) return cached;
 
-  let top: number;
-  if (row === 0) {
-    top = 0;
-  } else if (row > 0) {
-    top =
-      getTileTop(col, row - 1, layout) +
-      getTileHeight(col, row - 1, layout) +
-      layout.itemGap;
-  } else {
-    top =
-      getTileTop(col, row + 1, layout) -
-      getTileHeight(col, row, layout) -
-      layout.itemGap;
+  if (row >= 0) {
+    const walked = layout.columnWalkRow.get(col) ?? 0;
+    const startRow = row < walked ? 0 : walked;
+    let top = layout.tileTopCache.get(`${col}:${startRow}`) ?? 0;
+
+    if (row < startRow) {
+      for (let r = startRow - 1; r >= row; r--) {
+        top -= getTileHeight(col, r, layout) + layout.itemGap;
+        layout.tileTopCache.set(`${col}:${r}`, top);
+      }
+    } else {
+      for (let r = startRow; r < row; r++) {
+        layout.tileTopCache.set(`${col}:${r}`, top);
+        top += getTileHeight(col, r, layout) + layout.itemGap;
+      }
+      layout.columnWalkRow.set(col, Math.max(walked, row));
+    }
+
+    layout.tileTopCache.set(key, top);
+    return top;
+  }
+
+  const originTop = getTileTop(col, 0, layout);
+  let top = originTop;
+  for (let r = -1; r >= row; r--) {
+    top -= getTileHeight(col, r, layout) + layout.itemGap;
+    layout.tileTopCache.set(`${col}:${r}`, top);
   }
 
   layout.tileTopCache.set(key, top);
@@ -174,6 +190,42 @@ export interface PlacedCell {
   height: number;
 }
 
+const ROW_SCAN_PADDING = 6;
+
+function getRowScanRange(
+  col: number,
+  yMin: number,
+  yMax: number,
+  layout: GridLayout,
+): { rowStart: number; rowEnd: number } {
+  const localCol = positiveMod(col, layout.columns);
+  const avgStep = layout.patternHeight[localCol] / layout.rows;
+  if (avgStep <= 0) {
+    return { rowStart: -ROW_SCAN_PADDING, rowEnd: ROW_SCAN_PADDING };
+  }
+
+  const viewRows = Math.ceil((yMax - yMin) / avgStep);
+  const margin = (viewRows + ROW_SCAN_PADDING) * 2;
+  const rowStart = Math.floor(yMin / avgStep) - margin;
+  const rowEnd = Math.ceil(yMax / avgStep) + margin;
+  return { rowStart, rowEnd };
+}
+
+function cellIntersectsBounds(
+  cell: PlacedCell,
+  xMin: number,
+  xMax: number,
+  yMin: number,
+  yMax: number,
+): boolean {
+  return (
+    cell.left + cell.width >= xMin &&
+    cell.left <= xMax &&
+    cell.top + cell.height >= yMin &&
+    cell.top <= yMax
+  );
+}
+
 export function computeVisibleCells(
   pan: { x: number; y: number },
   viewport: { width: number; height: number },
@@ -195,14 +247,14 @@ export function computeVisibleCells(
 
   for (let col = colStart; col <= colEnd; col++) {
     const localCol = positiveMod(col, layout.columns);
-    const colLeft = getCycle(col, layout.columns) * layout.patternWidth + layout.columnLeft[localCol];
+    const colLeft =
+      getCycle(col, layout.columns) * layout.patternWidth +
+      layout.columnLeft[localCol];
     const colRight = colLeft + layout.columnWidth[localCol];
 
     if (colRight < xMin || colLeft > xMax) continue;
 
-    const avgRowStep = layout.patternHeight[localCol] / layout.rows;
-    const rowStart = Math.floor(yMin / avgRowStep) - 2;
-    const rowEnd = Math.ceil(yMax / avgRowStep) + 2;
+    const { rowStart, rowEnd } = getRowScanRange(col, yMin, yMax, layout);
 
     for (let row = rowStart; row <= rowEnd; row++) {
       const left = getTileLeft(col, row, layout);
@@ -218,4 +270,19 @@ export function computeVisibleCells(
   }
 
   return cells;
+}
+
+export function filterCellsByViewport(
+  cells: PlacedCell[],
+  pan: { x: number; y: number },
+  viewport: { width: number; height: number },
+  buffer = 0,
+): PlacedCell[] {
+  const xMin = -pan.x - buffer;
+  const xMax = -pan.x + viewport.width + buffer;
+  const yMin = -pan.y - buffer;
+  const yMax = -pan.y + viewport.height + buffer;
+  return cells.filter((cell) =>
+    cellIntersectsBounds(cell, xMin, xMax, yMin, yMax),
+  );
 }

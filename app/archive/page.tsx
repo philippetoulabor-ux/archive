@@ -7,8 +7,8 @@ const InfiniteGrid = dynamic(
   { ssr: false },
 );
 
-export default function ArchivePage() {
-  const projects = getArchiveProjects();
+export default async function ArchivePage() {
+  const projects = await getArchiveProjects();
 
   return (
     <main

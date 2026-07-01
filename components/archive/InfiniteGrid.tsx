@@ -18,6 +18,7 @@ import {
 import {
   buildGridLayout,
   computeVisibleCells,
+  filterCellsByViewport,
   positiveMod,
   type PlacedCell,
 } from "@/lib/archive/layout";
@@ -102,14 +103,15 @@ const GridCell = memo(function GridCell({
       <img
         src={image.src}
         alt={project.title}
-        width={width}
-        height={height}
+        width={image.width}
+        height={image.height}
         loading="lazy"
         decoding="async"
         draggable={false}
         style={{
           width: "100%",
           height: "100%",
+          objectFit: "cover",
           display: "block",
           pointerEvents: "none",
           userSelect: "none",
@@ -185,18 +187,9 @@ export const InfiniteGrid = ({
           : nextViewport,
       );
 
-      const cells = computeVisibleCells(
-        { x: panX, y: panY },
-        nextViewport,
-        layoutRef.current,
-        100,
-      );
-      const strictCells = computeVisibleCells(
-        { x: panX, y: panY },
-        nextViewport,
-        layoutRef.current,
-        0,
-      );
+      const pan = { x: panX, y: panY };
+      const cells = computeVisibleCells(pan, nextViewport, layoutRef.current, 100);
+      const strictCells = filterCellsByViewport(cells, pan, nextViewport, 0);
       const keys = cellKeysSignature(cells);
       const strictKeys = cellKeysSignature(strictCells);
       if (

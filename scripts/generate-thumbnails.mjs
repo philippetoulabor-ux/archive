@@ -7,6 +7,11 @@ const THUMB_ROOT = path.join(process.cwd(), "public/database-archive-thumbs");
 const MAX_WIDTH = 800;
 const WEBP_QUALITY = 80;
 const IMAGE_EXTENSIONS = new Set([".webp", ".jpg", ".jpeg", ".png"]);
+const EXCLUDED_DIRS = new Set(["logo", "_thumbs", "buttons"]);
+
+function shouldSkipDir(name) {
+  return name.startsWith("_") || EXCLUDED_DIRS.has(name);
+}
 
 function findAllImages(dir) {
   const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
@@ -17,6 +22,9 @@ function findAllImages(dir) {
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
+      if (shouldSkipDir(entry.name)) {
+        continue;
+      }
       images.push(...findAllImages(fullPath));
       continue;
     }
@@ -43,6 +51,26 @@ async function generateThumb(sourcePath, destPath) {
     .toFile(destPath);
 }
 
+async function thumbNeedsRegeneration(sourcePath, thumbPath) {
+  if (!fs.existsSync(thumbPath)) {
+    return true;
+  }
+
+  const sourceMtime = fs.statSync(sourcePath).mtimeMs;
+  const thumbMtime = fs.statSync(thumbPath).mtimeMs;
+  if (thumbMtime < sourceMtime) {
+    return true;
+  }
+
+  const [sourceMeta, thumbMeta] = await Promise.all([
+    sharp(sourcePath).rotate().metadata(),
+    sharp(thumbPath).metadata(),
+  ]);
+  const sourceAspect = sourceMeta.width / sourceMeta.height;
+  const thumbAspect = thumbMeta.width / thumbMeta.height;
+  return Math.abs(sourceAspect - thumbAspect) > 0.02;
+}
+
 async function main() {
   if (!fs.existsSync(ARCHIVE_ROOT)) {
     console.log("database-archive/ not found, skipping thumbnail generation.");
@@ -56,13 +84,9 @@ async function main() {
   for (const imagePath of images) {
     const thumbPath = toThumbPath(imagePath);
 
-    if (fs.existsSync(thumbPath)) {
-      const sourceMtime = fs.statSync(imagePath).mtimeMs;
-      const thumbMtime = fs.statSync(thumbPath).mtimeMs;
-      if (thumbMtime >= sourceMtime) {
-        skipped++;
-        continue;
-      }
+    if (!(await thumbNeedsRegeneration(imagePath, thumbPath))) {
+      skipped++;
+      continue;
     }
 
     await generateThumb(imagePath, thumbPath);
