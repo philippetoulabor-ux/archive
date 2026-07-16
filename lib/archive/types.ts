@@ -1,5 +1,6 @@
 export interface ProjectImage {
   src: string;
+  fullSrc: string;
   width: number;
   height: number;
 }

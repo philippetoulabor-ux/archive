@@ -23,7 +23,7 @@ import {
   type PlacedCell,
 } from "@/lib/archive/layout";
 import { pickCellImage } from "@/lib/archive/pickCellImage";
-import type { ArchiveProject } from "@/lib/archive/types";
+import type { ArchiveProject, ProjectImage } from "@/lib/archive/types";
 
 export interface InfiniteGridProps {
   projects: ArchiveProject[];
@@ -34,6 +34,7 @@ export interface InfiniteGridProps {
 }
 
 interface GridCellProps {
+  cellKey: string;
   project: ArchiveProject;
   col: number;
   row: number;
@@ -43,7 +44,40 @@ interface GridCellProps {
   height: number;
   animateIn: boolean;
   isPending: boolean;
+  isFocused: boolean;
 }
+
+interface FocusRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+interface FocusedCell {
+  key: string;
+  project: ArchiveProject;
+  image: ProjectImage;
+  fromRect: FocusRect;
+}
+
+const CLICK_MOVE_THRESHOLD_PX = 8;
+const FOCUS_MAX_VIEWPORT_RATIO = 0.85;
+const FOCUS_EASE_OUT = [0.22, 1, 0.36, 1] as const;
+const FOCUS_EASE_IN_OUT = [0.45, 0.05, 0.25, 1] as const;
+const FOCUS_TRANSITION_OPEN = {
+  duration: 0.4,
+  ease: FOCUS_EASE_OUT,
+};
+const FOCUS_TRANSITION_CLOSE = {
+  duration: 0.48,
+  ease: FOCUS_EASE_IN_OUT,
+};
+const BLUR_MS = 550;
+const BACKDROP_FADE = {
+  duration: 0.5,
+  ease: FOCUS_EASE_IN_OUT,
+};
 
 function cellKeysSignature(cells: PlacedCell[]): string {
   return cells
@@ -61,7 +95,67 @@ function readViewportSize(element: HTMLDivElement | null): {
   return { width, height };
 }
 
+function rectRelativeToViewport(
+  cellEl: Element,
+  viewportEl: HTMLElement,
+): FocusRect {
+  const viewportRect = viewportEl.getBoundingClientRect();
+  const cellRect = cellEl.getBoundingClientRect();
+  return {
+    left: cellRect.left - viewportRect.left,
+    top: cellRect.top - viewportRect.top,
+    width: cellRect.width,
+    height: cellRect.height,
+  };
+}
+
+function maxAreaForAspect(
+  aspect: number,
+  maxW: number,
+  maxH: number,
+): number {
+  return Math.min((maxW * maxW) / aspect, maxH * maxH * aspect);
+}
+
+function sizeForEqualArea(
+  aspect: number,
+  targetArea: number,
+  maxW: number,
+  maxH: number,
+): { width: number; height: number } {
+  let width = Math.sqrt(targetArea * aspect);
+  let height = Math.sqrt(targetArea / aspect);
+  const fit = Math.min(1, maxW / width, maxH / height);
+  width *= fit;
+  height *= fit;
+  return { width, height };
+}
+
+function computeFocusTarget(
+  image: ProjectImage,
+  viewportWidth: number,
+  viewportHeight: number,
+): FocusRect {
+  const maxW = viewportWidth * FOCUS_MAX_VIEWPORT_RATIO;
+  const maxH = viewportHeight * FOCUS_MAX_VIEWPORT_RATIO;
+  const aspect = image.width / Math.max(image.height, 1);
+  // Area that still fits for aspects from 1:3 to 3:1 — so portrait and
+  // landscape share the same pixel area instead of portraits getting shrunk.
+  const targetArea = Math.min(
+    maxAreaForAspect(1 / 3, maxW, maxH),
+    maxAreaForAspect(3, maxW, maxH),
+  );
+  const { width, height } = sizeForEqualArea(aspect, targetArea, maxW, maxH);
+  return {
+    left: (viewportWidth - width) / 2,
+    top: (viewportHeight - height) / 2,
+    width,
+    height,
+  };
+}
+
 const GridCell = memo(function GridCell({
+  cellKey,
   project,
   col,
   row,
@@ -71,6 +165,7 @@ const GridCell = memo(function GridCell({
   height,
   animateIn,
   isPending,
+  isFocused,
 }: GridCellProps) {
   const image = pickCellImage(project, col, row);
   const enterRef = useRef(animateIn);
@@ -88,6 +183,7 @@ const GridCell = memo(function GridCell({
   return (
     <div
       className={className}
+      data-cell-key={cellKey}
       style={{
         position: "absolute",
         left,
@@ -97,6 +193,7 @@ const GridCell = memo(function GridCell({
         overflow: "hidden",
         borderRadius: 4,
         contain: "layout paint",
+        visibility: isFocused ? "hidden" : undefined,
       }}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -120,6 +217,292 @@ const GridCell = memo(function GridCell({
     </div>
   );
 });
+
+const FOCUS_SERIES_GAP = 64;
+const FOCUS_SCROLL_WASH_MAX = 0.5;
+
+function isSameProjectImage(a: ProjectImage, b: ProjectImage): boolean {
+  return a.fullSrc === b.fullSrc || a.src === b.src;
+}
+
+function FocusOverlay({
+  focused,
+  closing,
+  viewportWidth,
+  viewportHeight,
+  onRequestClose,
+  onCloseComplete,
+}: {
+  focused: FocusedCell;
+  closing: boolean;
+  viewportWidth: number;
+  viewportHeight: number;
+  onRequestClose: () => void;
+  onCloseComplete: () => void;
+}) {
+  const target = computeFocusTarget(
+    focused.image,
+    viewportWidth,
+    viewportHeight,
+  );
+  const [settled, setSettled] = useState(false);
+  const [heroSrc, setHeroSrc] = useState(focused.image.src);
+  const [scrollWash, setScrollWash] = useState(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const restImages = useMemo(
+    () =>
+      focused.project.images.filter(
+        (image) => !isSameProjectImage(image, focused.image),
+      ),
+    [focused.project.images, focused.image],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const full = new window.Image();
+    full.src = focused.image.fullSrc;
+    if (full.complete) {
+      setHeroSrc(focused.image.fullSrc);
+      return;
+    }
+    full.onload = () => {
+      if (!cancelled) setHeroSrc(focused.image.fullSrc);
+    };
+    return () => {
+      cancelled = true;
+    };
+  }, [focused.image.fullSrc]);
+
+  useLayoutEffect(() => {
+    if (!closing) return;
+    setSettled(false);
+    setScrollWash(0);
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = 0;
+    }
+  }, [closing]);
+
+  const syncScrollWash = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) {
+      setScrollWash(0);
+      return;
+    }
+    const range = Math.max(viewportHeight * 1.7, 1);
+    const t = Math.min(1, el.scrollTop / range);
+    setScrollWash(t * FOCUS_SCROLL_WASH_MAX);
+  }, [viewportHeight]);
+
+  const showFloatingHero = !settled || closing;
+  const showScroll = settled && !closing;
+  const layoutTransition = closing
+    ? FOCUS_TRANSITION_CLOSE
+    : FOCUS_TRANSITION_OPEN;
+  const animateTo = closing ? focused.fromRect : target;
+
+  const handleScrollAreaClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if ((event.target as HTMLElement).closest("img")) return;
+      onRequestClose();
+    },
+    [onRequestClose],
+  );
+
+  return (
+    <div
+      className="archive-focus-layer"
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 10,
+        pointerEvents: "auto",
+      }}
+    >
+      <motion.div
+        className="archive-focus-backdrop"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: closing ? 0 : 1 }}
+        transition={
+          closing
+            ? { duration: 0.38, ease: FOCUS_EASE_IN_OUT }
+            : BACKDROP_FADE
+        }
+        onClick={onRequestClose}
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: "rgba(255, 255, 255, 0.35)",
+          cursor: "zoom-out",
+        }}
+      />
+      <div
+        className="archive-focus-scroll-wash"
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: "#fff",
+          opacity: scrollWash,
+          pointerEvents: "none",
+        }}
+      />
+      {showScroll ? (
+        <div
+          ref={scrollRef}
+          className="archive-focus-scroll"
+          onClick={handleScrollAreaClick}
+          onScroll={syncScrollWash}
+          style={{
+            position: "absolute",
+            inset: 0,
+            overflowX: "hidden",
+            overflowY: "auto",
+            overscrollBehavior: "contain",
+            touchAction: "pan-y",
+            cursor: "zoom-out",
+          }}
+        >
+          <div
+            style={{
+              width: viewportWidth * FOCUS_MAX_VIEWPORT_RATIO,
+              margin: "0 auto",
+              paddingTop: target.top,
+              paddingBottom: Math.max(target.top, viewportHeight * 0.2),
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: FOCUS_SERIES_GAP,
+              cursor: "default",
+            }}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={heroSrc}
+              alt={focused.project.title}
+              width={focused.image.width}
+              height={focused.image.height}
+              draggable={false}
+              style={{
+                width: target.width,
+                height: target.height,
+                objectFit: "contain",
+                display: "block",
+                userSelect: "none",
+              }}
+            />
+            {restImages.map((image) => {
+              const aspect = image.width / Math.max(image.height, 1);
+              const targetArea = target.width * target.height;
+              const maxW = viewportWidth * FOCUS_MAX_VIEWPORT_RATIO;
+              const maxH = viewportHeight * FOCUS_MAX_VIEWPORT_RATIO;
+              const { width, height } = sizeForEqualArea(
+                aspect,
+                targetArea,
+                maxW,
+                maxH,
+              );
+              return (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={image.fullSrc}
+                  src={image.fullSrc}
+                  alt={focused.project.title}
+                  width={image.width}
+                  height={image.height}
+                  loading="lazy"
+                  decoding="async"
+                  draggable={false}
+                  style={{
+                    width,
+                    height,
+                    objectFit: "contain",
+                    display: "block",
+                    userSelect: "none",
+                  }}
+                />
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+      {showFloatingHero ? (
+        <motion.div
+          className="archive-focus-image"
+          initial={
+            closing
+              ? {
+                  left: target.left,
+                  top: target.top,
+                  width: target.width,
+                  height: target.height,
+                  borderRadius: 0,
+                  boxShadow: "0 12px 40px 0 rgba(0, 0, 0, 0.18)",
+                }
+              : {
+                  left: focused.fromRect.left,
+                  top: focused.fromRect.top,
+                  width: focused.fromRect.width,
+                  height: focused.fromRect.height,
+                  borderRadius: 4,
+                  boxShadow: "0 0 0 0 rgba(0, 0, 0, 0)",
+                }
+          }
+          animate={{
+            left: animateTo.left,
+            top: animateTo.top,
+            width: animateTo.width,
+            height: animateTo.height,
+            borderRadius: closing ? 4 : 0,
+            boxShadow: closing
+              ? "0 0 0 0 rgba(0, 0, 0, 0)"
+              : "0 12px 40px 0 rgba(0, 0, 0, 0.18)",
+          }}
+          transition={{
+            left: layoutTransition,
+            top: layoutTransition,
+            width: layoutTransition,
+            height: layoutTransition,
+            borderRadius: layoutTransition,
+            boxShadow: closing
+              ? { duration: 0.3, ease: FOCUS_EASE_IN_OUT }
+              : { duration: 0.4, ease: FOCUS_EASE_OUT },
+          }}
+          onAnimationComplete={() => {
+            if (closing) {
+              onCloseComplete();
+              return;
+            }
+            setSettled(true);
+          }}
+          style={{
+            position: "absolute",
+            overflow: "hidden",
+            pointerEvents: "none",
+            willChange: "left, top, width, height",
+          }}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={heroSrc}
+            alt={focused.project.title}
+            width={focused.image.width}
+            height={focused.image.height}
+            draggable={false}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: "contain",
+              display: "block",
+              userSelect: "none",
+              pointerEvents: "none",
+            }}
+          />
+        </motion.div>
+      ) : null}
+    </div>
+  );
+}
 
 export const InfiniteGrid = ({
   projects,
@@ -159,6 +542,17 @@ export const InfiniteGrid = ({
   const panRafRef = useRef<number | null>(null);
   const [animateInKeys, setAnimateInKeys] = useState<Set<string>>(() => new Set());
 
+  const [focused, setFocused] = useState<FocusedCell | null>(null);
+  const [closing, setClosing] = useState(false);
+  const [gridBlurred, setGridBlurred] = useState(false);
+  const focusedRef = useRef<FocusedCell | null>(null);
+  const closingRef = useRef(false);
+  focusedRef.current = focused;
+  closingRef.current = closing;
+
+  const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
+  const didDragRef = useRef(false);
+
   layoutRef.current = layout;
   viewportSizeRef.current = viewport;
 
@@ -175,6 +569,9 @@ export const InfiniteGrid = ({
   const dragControls = useDragControls();
   const x = useMotionValue(0);
   const y = useMotionValue(0);
+
+  const isFocusOpen = focused !== null;
+  const isFocusLocked = isFocusOpen;
 
   const syncGrid = useCallback(
     (panX: number, panY: number, force = false) => {
@@ -239,11 +636,81 @@ export const InfiniteGrid = ({
     return () => observer.disconnect();
   }, [syncGrid, x, y]);
 
+  const openFocusFromPoint = useCallback(
+    (clientX: number, clientY: number) => {
+      const viewportEl = viewportRef.current;
+      if (!viewportEl) return;
+
+      const hit = document.elementFromPoint(clientX, clientY);
+      const cellEl = hit?.closest("[data-cell-key]") as HTMLElement | null;
+      if (!cellEl) return;
+
+      const key = cellEl.dataset.cellKey;
+      if (!key) return;
+
+      const [colStr, rowStr] = key.split(":");
+      const col = Number(colStr);
+      const row = Number(rowStr);
+      if (!Number.isFinite(col) || !Number.isFinite(row)) return;
+
+      const project = getProjectAt(col, row);
+      const image = pickCellImage(project, col, row);
+      const fromRect = rectRelativeToViewport(cellEl, viewportEl);
+
+      setClosing(false);
+      setGridBlurred(true);
+      setFocused({ key, project, image, fromRect });
+    },
+    [getProjectAt],
+  );
+
+  const requestClose = useCallback(() => {
+    const current = focusedRef.current;
+    if (!current || closingRef.current) return;
+
+    const viewportEl = viewportRef.current;
+    const cellEl = viewportEl?.querySelector(
+      `[data-cell-key="${current.key}"]`,
+    );
+    if (viewportEl && cellEl) {
+      const fromRect = rectRelativeToViewport(cellEl, viewportEl);
+      setFocused({ ...current, fromRect });
+    }
+    setGridBlurred(false);
+    setClosing(true);
+  }, []);
+
+  const handleCloseComplete = useCallback(() => {
+    setFocused(null);
+    setClosing(false);
+    setGridBlurred(false);
+  }, []);
+
   const startDrag = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
+      if (focusedRef.current) return;
+      pointerDownRef.current = { x: event.clientX, y: event.clientY };
+      didDragRef.current = false;
       dragControls.start(event);
     },
     [dragControls],
+  );
+
+  const handlePointerUp = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (focusedRef.current) return;
+
+      const down = pointerDownRef.current;
+      pointerDownRef.current = null;
+      if (!down || didDragRef.current) return;
+
+      const dx = event.clientX - down.x;
+      const dy = event.clientY - down.y;
+      if (Math.hypot(dx, dy) > CLICK_MOVE_THRESHOLD_PX) return;
+
+      openFocusFromPoint(event.clientX, event.clientY);
+    },
+    [openFocusFromPoint],
   );
 
   const scheduleVisibleCellsUpdate = useCallback(() => {
@@ -270,6 +737,10 @@ export const InfiniteGrid = ({
 
   const applyWheelDelta = useCallback(() => {
     wheelRafRef.current = null;
+    if (focusedRef.current) {
+      wheelDeltaRef.current = { dx: 0, dy: 0 };
+      return;
+    }
     const { dx, dy } = wheelDeltaRef.current;
     wheelDeltaRef.current = { dx: 0, dy: 0 };
     if (dx !== 0 || dy !== 0) {
@@ -280,6 +751,7 @@ export const InfiniteGrid = ({
 
   const handleWheel = useCallback(
     (event: WheelEvent) => {
+      if (focusedRef.current) return;
       event.preventDefault();
       wheelDeltaRef.current.dx += event.deltaX;
       wheelDeltaRef.current.dy += event.deltaY;
@@ -302,6 +774,20 @@ export const InfiniteGrid = ({
       }
     };
   }, [handleWheel]);
+
+  useEffect(() => {
+    if (!isFocusOpen) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        requestClose();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isFocusOpen, requestClose]);
 
   if (gridProjects.length === 0) {
     return (
@@ -331,14 +817,24 @@ export const InfiniteGrid = ({
       ref={viewportRef}
       className={className}
       data-dragging={isDragging ? "true" : undefined}
+      data-focused={isFocusLocked ? "true" : undefined}
+      data-blurred={gridBlurred ? "true" : undefined}
       onPointerDown={startDrag}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={() => {
+        pointerDownRef.current = null;
+      }}
       style={{
         position: "relative",
         width: "100%",
         height: "100%",
         overflow: "hidden",
         touchAction: "none",
-        cursor: isDragging ? "grabbing" : "grab",
+        cursor: isFocusLocked
+          ? "default"
+          : isDragging
+            ? "grabbing"
+            : "grab",
       }}
     >
       <style>{`
@@ -368,16 +864,37 @@ export const InfiniteGrid = ({
         .archive-grid-viewport[data-dragging="true"] .archive-grid-cell:hover {
           transform: none;
         }
+        .archive-grid-viewport[data-focused="true"] .archive-grid-cell:hover {
+          transform: none;
+        }
+        .archive-grid-layer {
+          filter: blur(0px);
+          opacity: 1;
+          transition:
+            filter ${BLUR_MS}ms cubic-bezier(0.45, 0.05, 0.25, 1),
+            opacity ${BLUR_MS}ms cubic-bezier(0.45, 0.05, 0.25, 1);
+        }
+        .archive-grid-viewport[data-blurred="true"] .archive-grid-layer {
+          filter: blur(12px);
+          opacity: 0.85;
+        }
+        .archive-grid-viewport[data-focused="true"] .archive-grid-layer {
+          pointer-events: none;
+        }
       `}</style>
       <motion.div
-        drag
+        className="archive-grid-layer"
+        drag={!isFocusLocked}
         dragControls={dragControls}
         dragListener={false}
-        dragMomentum
+        dragMomentum={!isFocusLocked}
         dragElastic={0}
         dragTransition={{ power: 0.3, timeConstant: 250 }}
         initial={false}
-        onDragStart={() => setIsDragging(true)}
+        onDragStart={() => {
+          didDragRef.current = true;
+          setIsDragging(true);
+        }}
         onDragEnd={() => setIsDragging(false)}
         style={{
           x,
@@ -392,6 +909,7 @@ export const InfiniteGrid = ({
           return (
             <GridCell
               key={key}
+              cellKey={key}
               project={getProjectAt(col, row)}
               col={col}
               row={row}
@@ -401,10 +919,21 @@ export const InfiniteGrid = ({
               height={height}
               animateIn={animateInKeys.has(key)}
               isPending={!strictVisibleKeysRef.current.has(key)}
+              isFocused={focused?.key === key}
             />
           );
         })}
       </motion.div>
+      {focused ? (
+        <FocusOverlay
+          focused={focused}
+          closing={closing}
+          viewportWidth={viewport.width}
+          viewportHeight={viewport.height}
+          onRequestClose={requestClose}
+          onCloseComplete={handleCloseComplete}
+        />
+      ) : null}
     </div>
   );
 };

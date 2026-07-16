@@ -121,6 +121,7 @@ export async function getArchiveProjects(): Promise<ArchiveProject[]> {
         const dimensions = await readImageDimensions(archiveRoot, imagePath);
         return {
           src: resolveImageSrc(archiveRoot, imagePath),
+          fullSrc: toImageSrc(archiveRoot, imagePath),
           width: dimensions.width,
           height: dimensions.height,
         };
