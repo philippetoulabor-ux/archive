@@ -62,7 +62,9 @@ interface FocusedCell {
 }
 
 const CLICK_MOVE_THRESHOLD_PX = 8;
-const FOCUS_MAX_VIEWPORT_RATIO = 0.85;
+const FOCUS_MAX_VIEWPORT_RATIO = 0.94;
+const FOCUS_MAX_VIEWPORT_RATIO_MOBILE = 0.96;
+const FOCUS_MOBILE_BREAKPOINT = 700;
 const FOCUS_EASE_OUT = [0.22, 1, 0.36, 1] as const;
 const FOCUS_EASE_IN_OUT = [0.45, 0.05, 0.25, 1] as const;
 const FOCUS_TRANSITION_OPEN = {
@@ -109,14 +111,6 @@ function rectRelativeToViewport(
   };
 }
 
-function maxAreaForAspect(
-  aspect: number,
-  maxW: number,
-  maxH: number,
-): number {
-  return Math.min((maxW * maxW) / aspect, maxH * maxH * aspect);
-}
-
 function sizeForEqualArea(
   aspect: number,
   targetArea: number,
@@ -131,21 +125,29 @@ function sizeForEqualArea(
   return { width, height };
 }
 
+function focusMaxViewportRatio(viewportWidth: number): number {
+  return viewportWidth < FOCUS_MOBILE_BREAKPOINT
+    ? FOCUS_MAX_VIEWPORT_RATIO_MOBILE
+    : FOCUS_MAX_VIEWPORT_RATIO;
+}
+
 function computeFocusTarget(
   image: ProjectImage,
   viewportWidth: number,
   viewportHeight: number,
 ): FocusRect {
-  const maxW = viewportWidth * FOCUS_MAX_VIEWPORT_RATIO;
-  const maxH = viewportHeight * FOCUS_MAX_VIEWPORT_RATIO;
+  const ratio = focusMaxViewportRatio(viewportWidth);
+  const maxW = viewportWidth * ratio;
+  const maxH = viewportHeight * ratio;
   const aspect = image.width / Math.max(image.height, 1);
-  // Area that still fits for aspects from 1:3 to 3:1 — so portrait and
-  // landscape share the same pixel area instead of portraits getting shrunk.
-  const targetArea = Math.min(
-    maxAreaForAspect(1 / 3, maxW, maxH),
-    maxAreaForAspect(3, maxW, maxH),
-  );
-  const { width, height } = sizeForEqualArea(aspect, targetArea, maxW, maxH);
+  // Fit as large as possible within the max box (contain). Series images
+  // still share this hero's area via sizeForEqualArea below.
+  let width = maxW;
+  let height = width / aspect;
+  if (height > maxH) {
+    height = maxH;
+    width = height * aspect;
+  }
   return {
     left: (viewportWidth - width) / 2,
     top: (viewportHeight - height) / 2,
@@ -365,7 +367,7 @@ function FocusOverlay({
         >
           <div
             style={{
-              width: viewportWidth * FOCUS_MAX_VIEWPORT_RATIO,
+              width: viewportWidth * focusMaxViewportRatio(viewportWidth),
               margin: "0 auto",
               paddingTop: target.top,
               paddingBottom: Math.max(target.top, viewportHeight * 0.2),
@@ -394,8 +396,9 @@ function FocusOverlay({
             {restImages.map((image) => {
               const aspect = image.width / Math.max(image.height, 1);
               const targetArea = target.width * target.height;
-              const maxW = viewportWidth * FOCUS_MAX_VIEWPORT_RATIO;
-              const maxH = viewportHeight * FOCUS_MAX_VIEWPORT_RATIO;
+              const ratio = focusMaxViewportRatio(viewportWidth);
+              const maxW = viewportWidth * ratio;
+              const maxH = viewportHeight * ratio;
               const { width, height } = sizeForEqualArea(
                 aspect,
                 targetArea,
