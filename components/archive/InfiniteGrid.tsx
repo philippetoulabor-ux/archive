@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
 } from "react";
 import {
   motion,
@@ -222,9 +223,158 @@ const GridCell = memo(function GridCell({
 
 const FOCUS_SERIES_GAP = 64;
 const FOCUS_SCROLL_WASH_MAX = 0.5;
+/** Soft crossfade so thumb→full sharpening isn't a visible flash. */
+const FOCUS_FULL_FADE_MS = 1100;
+const FOCUS_FULL_FADE_EASE = "cubic-bezier(0.33, 0, 0.2, 1)";
+/** In-memory cache so thumb→full upgrades survive floating→scroll remounts. */
+const loadedFullSrcs = new Set<string>();
 
 function isSameProjectImage(a: ProjectImage, b: ProjectImage): boolean {
   return a.fullSrc === b.fullSrc || a.src === b.src;
+}
+
+function preloadImage(src: string): void {
+  if (!src || loadedFullSrcs.has(src)) return;
+  const img = new window.Image();
+  img.decoding = "async";
+  img.onload = () => {
+    loadedFullSrcs.add(src);
+  };
+  img.src = src;
+}
+
+/**
+ * Thumb stays visible; full fades in on top once decoded.
+ * Never swaps `src` on a single img (that reads as a flash).
+ */
+function ProgressiveFocusImage({
+  thumbSrc,
+  fullSrc,
+  alt,
+  width,
+  height,
+  displayWidth,
+  displayHeight,
+  priority,
+  allowFull = true,
+  objectFit = "contain",
+}: {
+  thumbSrc: string;
+  fullSrc: string;
+  alt: string;
+  width: number;
+  height: number;
+  displayWidth: number;
+  displayHeight: number;
+  priority?: boolean;
+  /** When false, keep showing only the thumb (e.g. during open morph). */
+  allowFull?: boolean;
+  objectFit?: "contain" | "cover";
+}) {
+  const sameSrc = fullSrc === thumbSrc;
+  const [fullReady, setFullReady] = useState(
+    () => sameSrc || loadedFullSrcs.has(fullSrc),
+  );
+  const [fullOpaque, setFullOpaque] = useState(false);
+
+  useEffect(() => {
+    if (sameSrc) {
+      setFullReady(true);
+      return;
+    }
+    let cancelled = false;
+    const img = new window.Image();
+    img.decoding = "async";
+    const markReady = async () => {
+      loadedFullSrcs.add(fullSrc);
+      try {
+        if (typeof img.decode === "function") {
+          await img.decode();
+        }
+      } catch {
+        // decode() can reject on abort; still paint via onload path
+      }
+      if (!cancelled) setFullReady(true);
+    };
+    img.onload = () => {
+      void markReady();
+    };
+    img.src = fullSrc;
+    if (img.complete) void markReady();
+    return () => {
+      cancelled = true;
+    };
+  }, [sameSrc, fullSrc]);
+
+  useEffect(() => {
+    if (!allowFull || !fullReady || sameSrc) {
+      setFullOpaque(false);
+      return;
+    }
+    // Mount full at opacity 0, then fade — avoids a one-frame opaque flash.
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => setFullOpaque(true));
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
+  }, [allowFull, fullReady, sameSrc]);
+
+  const frameStyle: CSSProperties = {
+    position: "relative",
+    width: displayWidth,
+    height: displayHeight,
+    flexShrink: 0,
+    contentVisibility: priority ? undefined : "auto",
+    containIntrinsicSize: `${Math.round(displayWidth)}px ${Math.round(displayHeight)}px`,
+  };
+
+  const imgStyle: CSSProperties = {
+    width: "100%",
+    height: "100%",
+    objectFit,
+    display: "block",
+    userSelect: "none",
+    pointerEvents: "none",
+  };
+
+  return (
+    <div style={frameStyle}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={thumbSrc}
+        alt={alt}
+        width={width}
+        height={height}
+        decoding="sync"
+        draggable={false}
+        style={imgStyle}
+      />
+      {!sameSrc && allowFull && fullReady ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={fullSrc}
+          alt=""
+          width={width}
+          height={height}
+          decoding="async"
+          fetchPriority={priority ? "high" : "auto"}
+          draggable={false}
+          aria-hidden
+          style={{
+            ...imgStyle,
+            position: "absolute",
+            inset: 0,
+            opacity: fullOpaque ? 1 : 0,
+            transition: `opacity ${FOCUS_FULL_FADE_MS}ms ${FOCUS_FULL_FADE_EASE}`,
+            willChange: "opacity",
+          }}
+        />
+      ) : null}
+    </div>
+  );
 }
 
 function FocusOverlay({
@@ -248,9 +398,12 @@ function FocusOverlay({
     viewportHeight,
   );
   const [settled, setSettled] = useState(false);
-  const [heroSrc, setHeroSrc] = useState(focused.image.src);
-  const [scrollWash, setScrollWash] = useState(0);
+  // Keep floating hero mounted one frame after scroll mounts to avoid a blank handoff.
+  const [hideFloating, setHideFloating] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const washRef = useRef<HTMLDivElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
+  const openHandledRef = useRef(false);
 
   const restImages = useMemo(
     () =>
@@ -260,44 +413,75 @@ function FocusOverlay({
     [focused.project.images, focused.image],
   );
 
+  // Warm full-res images as soon as the overlay opens (hero first).
+  // Floating morph stays on the grid thumb so mid-animation src swaps can't blank it.
   useEffect(() => {
-    let cancelled = false;
-    const full = new window.Image();
-    full.src = focused.image.fullSrc;
-    if (full.complete) {
-      setHeroSrc(focused.image.fullSrc);
-      return;
-    }
-    full.onload = () => {
-      if (!cancelled) setHeroSrc(focused.image.fullSrc);
-    };
+    preloadImage(focused.image.fullSrc);
+    const schedule =
+      typeof window !== "undefined" && "requestIdleCallback" in window
+        ? (cb: () => void) => window.requestIdleCallback(cb)
+        : (cb: () => void) => window.setTimeout(cb, 80);
+    const cancel =
+      typeof window !== "undefined" && "cancelIdleCallback" in window
+        ? (id: number) => window.cancelIdleCallback(id)
+        : (id: number) => window.clearTimeout(id);
+    const id = schedule(() => {
+      for (const image of restImages) {
+        preloadImage(image.fullSrc);
+      }
+    });
     return () => {
-      cancelled = true;
+      cancel(id as number);
     };
-  }, [focused.image.fullSrc]);
+  }, [focused.image.fullSrc, restImages]);
 
   useLayoutEffect(() => {
     if (!closing) return;
+    openHandledRef.current = false;
     setSettled(false);
-    setScrollWash(0);
+    setHideFloating(false);
+    if (washRef.current) washRef.current.style.opacity = "0";
     if (scrollRef.current) {
       scrollRef.current.scrollTop = 0;
     }
   }, [closing]);
 
+  useLayoutEffect(() => {
+    if (!settled || closing) return;
+    let outer = 0;
+    let inner = 0;
+    outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => setHideFloating(true));
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
+  }, [settled, closing]);
+
   const syncScrollWash = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) {
-      setScrollWash(0);
-      return;
-    }
-    const range = Math.max(viewportHeight * 1.7, 1);
-    const t = Math.min(1, el.scrollTop / range);
-    setScrollWash(t * FOCUS_SCROLL_WASH_MAX);
+    if (scrollRafRef.current != null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const el = scrollRef.current;
+      const wash = washRef.current;
+      if (!el || !wash) return;
+      const range = Math.max(viewportHeight * 1.7, 1);
+      const t = Math.min(1, el.scrollTop / range);
+      wash.style.opacity = String(t * FOCUS_SCROLL_WASH_MAX);
+    });
   }, [viewportHeight]);
 
-  const showFloatingHero = !settled || closing;
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current != null) {
+        cancelAnimationFrame(scrollRafRef.current);
+      }
+    };
+  }, []);
+
   const showScroll = settled && !closing;
+  const showFloatingHero = closing || !hideFloating;
   const layoutTransition = closing
     ? FOCUS_TRANSITION_CLOSE
     : FOCUS_TRANSITION_OPEN;
@@ -339,14 +523,16 @@ function FocusOverlay({
         }}
       />
       <div
+        ref={washRef}
         className="archive-focus-scroll-wash"
         aria-hidden
         style={{
           position: "absolute",
           inset: 0,
           background: "#fff",
-          opacity: scrollWash,
+          opacity: 0,
           pointerEvents: "none",
+          willChange: "opacity",
         }}
       />
       {showScroll ? (
@@ -378,22 +564,18 @@ function FocusOverlay({
               cursor: "default",
             }}
           >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={heroSrc}
+            <ProgressiveFocusImage
+              thumbSrc={focused.image.src}
+              fullSrc={focused.image.fullSrc}
               alt={focused.project.title}
               width={focused.image.width}
               height={focused.image.height}
-              draggable={false}
-              style={{
-                width: target.width,
-                height: target.height,
-                objectFit: "contain",
-                display: "block",
-                userSelect: "none",
-              }}
+              displayWidth={target.width}
+              displayHeight={target.height}
+              priority
+              allowFull={hideFloating}
             />
-            {restImages.map((image) => {
+            {restImages.map((image, index) => {
               const aspect = image.width / Math.max(image.height, 1);
               const targetArea = target.width * target.height;
               const ratio = focusMaxViewportRatio(viewportWidth);
@@ -406,23 +588,17 @@ function FocusOverlay({
                 maxH,
               );
               return (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
+                <ProgressiveFocusImage
                   key={image.fullSrc}
-                  src={image.fullSrc}
+                  thumbSrc={image.src}
+                  fullSrc={image.fullSrc}
                   alt={focused.project.title}
                   width={image.width}
                   height={image.height}
-                  loading="lazy"
-                  decoding="async"
-                  draggable={false}
-                  style={{
-                    width,
-                    height,
-                    objectFit: "contain",
-                    display: "block",
-                    userSelect: "none",
-                  }}
+                  displayWidth={width}
+                  displayHeight={height}
+                  priority={index < 2}
+                  allowFull={hideFloating}
                 />
               );
             })}
@@ -476,6 +652,9 @@ function FocusOverlay({
               onCloseComplete();
               return;
             }
+            // Framer can fire once per animated value; only settle once.
+            if (openHandledRef.current) return;
+            openHandledRef.current = true;
             setSettled(true);
           }}
           style={{
@@ -483,19 +662,23 @@ function FocusOverlay({
             overflow: "hidden",
             pointerEvents: "none",
             willChange: "left, top, width, height",
+            // Match grid tile crop during morph; target box is image-aspect so
+            // cover ≈ contain at the end.
+            zIndex: 2,
           }}
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={heroSrc}
+            src={focused.image.src}
             alt={focused.project.title}
             width={focused.image.width}
             height={focused.image.height}
+            decoding="sync"
             draggable={false}
             style={{
               width: "100%",
               height: "100%",
-              objectFit: "contain",
+              objectFit: "cover",
               display: "block",
               userSelect: "none",
               pointerEvents: "none",
