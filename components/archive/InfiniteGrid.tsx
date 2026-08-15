@@ -125,29 +125,52 @@ function sizeForEqualArea(
   return { width, height };
 }
 
+/** Largest area an aspect ratio can occupy inside the max box. */
+function maxAreaForAspect(
+  aspect: number,
+  maxW: number,
+  maxH: number,
+): number {
+  return Math.min((maxW * maxW) / aspect, maxH * maxH * aspect);
+}
+
 function focusMaxViewportRatio(viewportWidth: number): number {
   return viewportWidth < FOCUS_MOBILE_BREAKPOINT
     ? FOCUS_MAX_VIEWPORT_RATIO_MOBILE
     : FOCUS_MAX_VIEWPORT_RATIO;
 }
 
+/** Shared pixel area so every image in the series fits and matches in size. */
+function sharedFocusArea(
+  images: ProjectImage[],
+  maxW: number,
+  maxH: number,
+): number {
+  let area = maxW * maxH;
+  for (const image of images) {
+    const aspect = image.width / Math.max(image.height, 1);
+    area = Math.min(area, maxAreaForAspect(aspect, maxW, maxH));
+  }
+  return area;
+}
+
 function computeFocusTarget(
   image: ProjectImage,
   viewportWidth: number,
   viewportHeight: number,
+  seriesImages: ProjectImage[],
 ): FocusRect {
   const ratio = focusMaxViewportRatio(viewportWidth);
   const maxW = viewportWidth * ratio;
   const maxH = viewportHeight * ratio;
+  const targetArea = sharedFocusArea(seriesImages, maxW, maxH);
   const aspect = image.width / Math.max(image.height, 1);
-  // Fit as large as possible within the max box (contain). Series images
-  // still share this hero's area via sizeForEqualArea below.
-  let width = maxW;
-  let height = width / aspect;
-  if (height > maxH) {
-    height = maxH;
-    width = height * aspect;
-  }
+  const { width, height } = sizeForEqualArea(
+    aspect,
+    targetArea,
+    maxW,
+    maxH,
+  );
   return {
     left: (viewportWidth - width) / 2,
     top: (viewportHeight - height) / 2,
@@ -193,7 +216,6 @@ const GridCell = memo(function GridCell({
         width,
         height,
         overflow: "hidden",
-        borderRadius: 4,
         contain: "layout paint",
         visibility: isFocused ? "hidden" : undefined,
       }}
@@ -395,7 +417,12 @@ function FocusOverlay({
     focused.image,
     viewportWidth,
     viewportHeight,
+    focused.project.images,
   );
+  const focusRatio = focusMaxViewportRatio(viewportWidth);
+  const focusMaxW = viewportWidth * focusRatio;
+  const focusMaxH = viewportHeight * focusRatio;
+  const focusTargetArea = target.width * target.height;
   const [settled, setSettled] = useState(false);
   // Keep floating hero mounted one frame after scroll mounts to avoid a blank handoff.
   const [hideFloating, setHideFloating] = useState(false);
@@ -576,15 +603,11 @@ function FocusOverlay({
             />
             {restImages.map((image, index) => {
               const aspect = image.width / Math.max(image.height, 1);
-              const targetArea = target.width * target.height;
-              const ratio = focusMaxViewportRatio(viewportWidth);
-              const maxW = viewportWidth * ratio;
-              const maxH = viewportHeight * ratio;
               const { width, height } = sizeForEqualArea(
                 aspect,
-                targetArea,
-                maxW,
-                maxH,
+                focusTargetArea,
+                focusMaxW,
+                focusMaxH,
               );
               return (
                 <ProgressiveFocusImage
@@ -614,7 +637,6 @@ function FocusOverlay({
                   top: target.top,
                   width: target.width,
                   height: target.height,
-                  borderRadius: 0,
                   boxShadow: "0 12px 40px 0 rgba(0, 0, 0, 0.18)",
                 }
               : {
@@ -622,7 +644,6 @@ function FocusOverlay({
                   top: focused.fromRect.top,
                   width: focused.fromRect.width,
                   height: focused.fromRect.height,
-                  borderRadius: 4,
                   boxShadow: "0 0 0 0 rgba(0, 0, 0, 0)",
                 }
           }
@@ -631,7 +652,6 @@ function FocusOverlay({
             top: animateTo.top,
             width: animateTo.width,
             height: animateTo.height,
-            borderRadius: closing ? 4 : 0,
             boxShadow: closing
               ? "0 0 0 0 rgba(0, 0, 0, 0)"
               : "0 12px 40px 0 rgba(0, 0, 0, 0.18)",
@@ -641,7 +661,6 @@ function FocusOverlay({
             top: layoutTransition,
             width: layoutTransition,
             height: layoutTransition,
-            borderRadius: layoutTransition,
             boxShadow: closing
               ? { duration: 0.3, ease: FOCUS_EASE_IN_OUT }
               : { duration: 0.4, ease: FOCUS_EASE_OUT },
