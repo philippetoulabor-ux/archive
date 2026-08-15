@@ -76,7 +76,6 @@ const FOCUS_TRANSITION_CLOSE = {
   duration: 0.48,
   ease: FOCUS_EASE_IN_OUT,
 };
-const BLUR_MS = 550;
 const BACKDROP_FADE = {
   duration: 0.5,
   ease: FOCUS_EASE_IN_OUT,
@@ -518,7 +517,7 @@ function FocusOverlay({
         style={{
           position: "absolute",
           inset: 0,
-          background: "rgba(255, 255, 255, 0.35)",
+          background: "rgba(255, 255, 255, 0.75)",
           cursor: "zoom-out",
         }}
       />
@@ -730,7 +729,6 @@ export const InfiniteGrid = ({
 
   const [focused, setFocused] = useState<FocusedCell | null>(null);
   const [closing, setClosing] = useState(false);
-  const [gridBlurred, setGridBlurred] = useState(false);
   const focusedRef = useRef<FocusedCell | null>(null);
   const closingRef = useRef(false);
   focusedRef.current = focused;
@@ -844,7 +842,6 @@ export const InfiniteGrid = ({
       const fromRect = rectRelativeToViewport(cellEl, viewportEl);
 
       setClosing(false);
-      setGridBlurred(true);
       setFocused({ key, project, image, fromRect });
     },
     [getProjectAt],
@@ -862,14 +859,12 @@ export const InfiniteGrid = ({
       const fromRect = rectRelativeToViewport(cellEl, viewportEl);
       setFocused({ ...current, fromRect });
     }
-    setGridBlurred(false);
     setClosing(true);
   }, []);
 
   const handleCloseComplete = useCallback(() => {
     setFocused(null);
     setClosing(false);
-    setGridBlurred(false);
   }, []);
 
   const startDrag = useCallback(
@@ -1004,7 +999,6 @@ export const InfiniteGrid = ({
       className={className}
       data-dragging={isDragging ? "true" : undefined}
       data-focused={isFocusLocked ? "true" : undefined}
-      data-blurred={gridBlurred ? "true" : undefined}
       onPointerDown={startDrag}
       onPointerUp={handlePointerUp}
       onPointerCancel={() => {
@@ -1052,17 +1046,6 @@ export const InfiniteGrid = ({
         }
         .archive-grid-viewport[data-focused="true"] .archive-grid-cell:hover {
           transform: none;
-        }
-        .archive-grid-layer {
-          filter: blur(0px);
-          opacity: 1;
-          transition:
-            filter ${BLUR_MS}ms cubic-bezier(0.45, 0.05, 0.25, 1),
-            opacity ${BLUR_MS}ms cubic-bezier(0.45, 0.05, 0.25, 1);
-        }
-        .archive-grid-viewport[data-blurred="true"] .archive-grid-layer {
-          filter: blur(12px);
-          opacity: 0.85;
         }
         .archive-grid-viewport[data-focused="true"] .archive-grid-layer {
           pointer-events: none;
